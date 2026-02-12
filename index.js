@@ -6,6 +6,11 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys"
 import qrcode from "qrcode-terminal"
 
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3"
+import fs from "fs"
+import archiver from "archiver"
+import unzipper from "unzipper"
+
 const PORT = process.env.PORT || 3000
 const PHONE_NUMBER = process.env.PHONE_NUMBER
 const PAIR_TYPE = process.env.PAIR_TYPE || "QR"
@@ -16,6 +21,92 @@ app.use(express.json())
 let sock = null
 let isConnected = false
 let isPairingRequested = false
+
+/* =========================
+   R2 CONFIG
+========================= */
+
+const r2 = new S3Client({
+  region: "auto",
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY,
+    secretAccessKey: process.env.R2_SECRET_KEY
+  }
+})
+
+const bucket = process.env.R2_BUCKET
+const key = process.env.R2_KEY || "auth.zip"
+
+let uploadTimer = null
+let isUploading = false
+
+async function uploadAuth() {
+  const output = fs.createWriteStream("auth.zip")
+  const archive = archiver("zip")
+
+  archive.pipe(output)
+  archive.directory("auth/", false)
+  await archive.finalize()
+
+  await new Promise(resolve => output.on("close", resolve))
+
+  const fileStream = fs.createReadStream("auth.zip")
+
+  await r2.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: fileStream
+  }))
+}
+
+async function downloadAuth() {
+  try {
+    if (!fs.existsSync("auth")) {
+      fs.mkdirSync("auth")
+    }
+
+    const data = await r2.send(new GetObjectCommand({
+      Bucket: bucket,
+      Key: key
+    }))
+
+    await new Promise((resolve, reject) => {
+      data.Body
+        .pipe(unzipper.Extract({ path: "./auth" }))
+        .on("close", resolve)
+        .on("error", reject)
+    })
+
+    console.log("Auth restored from R2")
+
+  } catch {
+    console.log("No existing auth in R2")
+  }
+}
+
+function scheduleUpload() {
+  if (uploadTimer) return
+
+  uploadTimer = setTimeout(async () => {
+    if (isUploading) return
+
+    try {
+      isUploading = true
+      await uploadAuth()
+      console.log("Auth uploaded to R2")
+    } catch (err) {
+      console.log("Upload failed:", err.message)
+    } finally {
+      isUploading = false
+      uploadTimer = null
+    }
+  }, 8000)
+}
+
+/* =========================
+   COMMON
+========================= */
 
 const silentLogger = {
   level: "silent",
@@ -28,14 +119,17 @@ const silentLogger = {
   fatal() {}
 }
 
-/* =========================
-   MODE: PAIRING CODE
-========================= */
-
 function formatJid(number) {
   const cleaned = number.replace(/^0/, "62")
   return `${cleaned}@s.whatsapp.net`
 }
+
+const jid = (to) =>
+  to.replace(/^0/, "62") + "@s.whatsapp.net"
+
+/* =========================
+   MODE: CODE
+========================= */
 
 async function initWithCode() {
   const { state, saveCreds } = await useMultiFileAuthState("auth")
@@ -49,7 +143,10 @@ async function initWithCode() {
     logger: silentLogger
   })
 
-  sock.ev.on("creds.update", saveCreds)
+  sock.ev.on("creds.update", async () => {
+    await saveCreds()
+    scheduleUpload()
+  })
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
 
@@ -86,9 +183,6 @@ async function initWithCode() {
    MODE: QR
 ========================= */
 
-const jid = (to) =>
-  to.replace(/^0/, "62") + "@s.whatsapp.net"
-
 async function initWithQR() {
   const { state, saveCreds } = await useMultiFileAuthState("auth")
   const { version } = await fetchLatestBaileysVersion()
@@ -101,7 +195,10 @@ async function initWithQR() {
     logger: silentLogger
   })
 
-  sock.ev.on("creds.update", saveCreds)
+  sock.ev.on("creds.update", async () => {
+    await saveCreds()
+    scheduleUpload()
+  })
 
   sock.ev.on("connection.update", ({ qr, connection, lastDisconnect }) => {
 
@@ -147,12 +244,11 @@ app.post("/send", async (req, res) => {
 
     const result = await sock.sendMessage(target, { text: msg })
 
-    console.log(`sent to ${to}: ${msg}`)
-
     return res.json({
       status: "sent",
       to,
-      msg
+      msg,
+      messageId: result?.key?.id
     })
 
   } catch (err) {
@@ -168,6 +264,8 @@ app.post("/send", async (req, res) => {
 ========================= */
 
 async function start() {
+  await downloadAuth()
+
   if (PAIR_TYPE === "CODE") {
     await initWithCode()
   } else {
