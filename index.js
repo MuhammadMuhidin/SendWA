@@ -22,7 +22,7 @@ let sock = null
 let isConnected = false
 let isPairingRequested = false
 let pairingRetryTimer = null
-const PAIRING_TIMEOUT = 2 * 60 * 1000 // 2 menit
+const PAIRING_TIMEOUT = 20 * 1000 // 20 detik
 
 /* =========================
    R2 CONFIG
