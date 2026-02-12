@@ -6,7 +6,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys"
 import qrcode from "qrcode-terminal"
 
-import { Pool } from "pg"
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3"
 import fs from "fs"
 import archiver from "archiver"
 import unzipper from "unzipper"
@@ -14,7 +14,6 @@ import unzipper from "unzipper"
 const PORT = process.env.PORT || 3000
 const PHONE_NUMBER = process.env.PHONE_NUMBER
 const PAIR_TYPE = process.env.PAIR_TYPE || "QR"
-const DATABASE_URL = process.env.KOYEBDB_URI
 
 const app = express()
 app.use(express.json())
@@ -24,13 +23,23 @@ let isConnected = false
 let isPairingRequested = false
 
 /* =========================
-   POSTGRES CONFIG
+   R2 CONFIG
 ========================= */
 
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+const r2 = new S3Client({
+  region: "auto",
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY,
+    secretAccessKey: process.env.R2_SECRET_KEY
+  }
 })
+
+const bucket = process.env.R2_BUCKET
+const key = process.env.R2_KEY || "auth.zip"
+
+let uploadTimer = null
+let isUploading = false
 
 async function uploadAuth() {
   const output = fs.createWriteStream("auth.zip")
@@ -42,19 +51,13 @@ async function uploadAuth() {
 
   await new Promise(resolve => output.on("close", resolve))
 
-  const zipBuffer = fs.readFileSync("auth.zip")
+  const fileStream = fs.createReadStream("auth.zip")
 
-  await pool.query(
-    `
-    INSERT INTO wa_session (id, data)
-    VALUES ($1, $2)
-    ON CONFLICT (id)
-    DO UPDATE SET data = $2, updated_at = NOW()
-    `,
-    ["main", zipBuffer]
-  )
-
-  console.log("Auth uploaded to PostgreSQL")
+  await r2.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: fileStream
+  }))
 }
 
 async function downloadAuth() {
@@ -63,34 +66,24 @@ async function downloadAuth() {
       fs.mkdirSync("auth")
     }
 
-    const result = await pool.query(
-      "SELECT data FROM wa_session WHERE id = $1",
-      ["main"]
-    )
-
-    if (result.rows.length === 0) {
-      console.log("No existing auth in DB")
-      return
-    }
-
-    fs.writeFileSync("auth.zip", result.rows[0].data)
+    const data = await r2.send(new GetObjectCommand({
+      Bucket: bucket,
+      Key: key
+    }))
 
     await new Promise((resolve, reject) => {
-      fs.createReadStream("auth.zip")
+      data.Body
         .pipe(unzipper.Extract({ path: "./auth" }))
         .on("close", resolve)
         .on("error", reject)
     })
 
-    console.log("Auth restored from PostgreSQL")
+    console.log("Auth restored from R2")
 
-  } catch (err) {
-    console.log("DB restore failed:", err.message)
+  } catch {
+    console.log("No existing auth in R2")
   }
 }
-
-let uploadTimer = null
-let isUploading = false
 
 function scheduleUpload() {
   if (uploadTimer) return
@@ -101,6 +94,7 @@ function scheduleUpload() {
     try {
       isUploading = true
       await uploadAuth()
+      console.log("Auth uploaded to R2")
     } catch (err) {
       console.log("Upload failed:", err.message)
     } finally {
@@ -248,10 +242,9 @@ app.post("/send", async (req, res) => {
         ? formatJid(to)
         : jid(to)
 
-    await sock.sendMessage(target, { text: msg })
+    const result = await sock.sendMessage(target, { text: msg })
 
     console.log(`sent to ${to} ${msg}`)
-
     return res.json({
       status: "sent",
       to,
