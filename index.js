@@ -247,8 +247,7 @@ app.post("/send", async (req, res) => {
     return res.json({
       status: "sent",
       to,
-      msg,
-      messageId: result?.key?.id
+      msg
     })
 
   } catch (err) {
