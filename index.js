@@ -23,7 +23,7 @@ let isConnected = false
 let isPairingRequested = false
 let pairingRetryTimer = null
 let hasLoggedPairingSuccess = false
-const PAIRING_TIMEOUT = 20 * 1000 // 20 detik
+const PAIRING_TIMEOUT = 20 * 1000
 
 /* =========================
    R2 CONFIG
@@ -82,7 +82,6 @@ async function downloadAuth() {
     })
 
     console.log("Auth restored from R2")
-
   } catch {
     console.log("No existing auth in R2")
   }
@@ -93,7 +92,6 @@ function scheduleUpload() {
 
   uploadTimer = setTimeout(async () => {
     if (isUploading) return
-
     try {
       isUploading = true
       await uploadAuth()
@@ -131,6 +129,34 @@ const jid = (to) =>
   to.replace(/^0/, "62") + "@s.whatsapp.net"
 
 /* =========================
+   PAIRING LOOP
+========================= */
+
+function startPairingLoop(state) {
+  if (pairingRetryTimer) return
+
+  pairingRetryTimer = setTimeout(async () => {
+    if (!isConnected && !state.creds.registered) {
+      console.log("Pairing expired, generating new code...")
+
+      try {
+        const newCode = await sock.requestPairingCode(PHONE_NUMBER)
+        console.log("New pairing code:", newCode)
+
+        pairingRetryTimer = null
+        startPairingLoop(state)
+      } catch (err) {
+        console.log("Failed to regenerate pairing code:", err.message)
+        pairingRetryTimer = null
+        startPairingLoop(state)
+      }
+    } else {
+      pairingRetryTimer = null
+    }
+  }, PAIRING_TIMEOUT)
+}
+
+/* =========================
    MODE: CODE
 ========================= */
 
@@ -154,17 +180,19 @@ async function initWithCode() {
   sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
 
     if (connection === "open") {
-  isConnected = true
+      isConnected = true
 
-  if (!hasLoggedPairingSuccess) {
-    console.log("Pairing success. WhatsApp connected.")
-    hasLoggedPairingSuccess = true
-  }
+      if (!hasLoggedPairingSuccess) {
+        console.log("Pairing success. WhatsApp connected.")
+        hasLoggedPairingSuccess = true
+      }
 
-  if (pairingRetryTimer) {
-    clearTimeout(pairingRetryTimer)
-    pairingRetryTimer = null
-  }
+      if (pairingRetryTimer) {
+        clearTimeout(pairingRetryTimer)
+        pairingRetryTimer = null
+      }
+
+      isPairingRequested = false
     }
 
     if (connection === "close") {
@@ -186,21 +214,8 @@ async function initWithCode() {
         const code = await sock.requestPairingCode(PHONE_NUMBER)
         console.log("Pairing code:", code)
 
-        // start timer kalau belum connect dalam 2 menit
-if (pairingRetryTimer) clearTimeout(pairingRetryTimer)
+        startPairingLoop(state)
 
-pairingRetryTimer = setTimeout(async () => {
-  if (!isConnected) {
-    console.log("Pairing expired, generating new code...")
-
-    try {
-      const newCode = await sock.requestPairingCode(PHONE_NUMBER)
-      console.log("New pairing code:", newCode)
-    } catch (err) {
-      console.log("Failed to regenerate pairing code:", err.message)
-    }
-  }
-}, PAIRING_TIMEOUT)
       } catch {
         isPairingRequested = false
       }
@@ -271,9 +286,10 @@ app.post("/send", async (req, res) => {
         ? formatJid(to)
         : jid(to)
 
-    const result = await sock.sendMessage(target, { text: msg })
+    await sock.sendMessage(target, { text: msg })
 
     console.log(`sent to ${to} ${msg}`)
+
     return res.json({
       status: "sent",
       to,
