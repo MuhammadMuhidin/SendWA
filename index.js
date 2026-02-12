@@ -21,6 +21,8 @@ app.use(express.json())
 let sock = null
 let isConnected = false
 let isPairingRequested = false
+let pairingRetryTimer = null
+const PAIRING_TIMEOUT = 2 * 60 * 1000 // 2 menit
 
 /* =========================
    R2 CONFIG
@@ -152,6 +154,10 @@ async function initWithCode() {
 
     if (connection === "open") {
       isConnected = true
+        if (pairingRetryTimer) {
+          clearTimeout(pairingRetryTimer)
+            pairingRetryTimer = null
+        }
     }
 
     if (connection === "close") {
@@ -172,6 +178,22 @@ async function initWithCode() {
       try {
         const code = await sock.requestPairingCode(PHONE_NUMBER)
         console.log("Pairing code:", code)
+
+        // start timer kalau belum connect dalam 2 menit
+if (pairingRetryTimer) clearTimeout(pairingRetryTimer)
+
+pairingRetryTimer = setTimeout(async () => {
+  if (!isConnected) {
+    console.log("Pairing expired, generating new code...")
+
+    try {
+      const newCode = await sock.requestPairingCode(PHONE_NUMBER)
+      console.log("New pairing code:", newCode)
+    } catch (err) {
+      console.log("Failed to regenerate pairing code:", err.message)
+    }
+  }
+}, PAIRING_TIMEOUT)
       } catch {
         isPairingRequested = false
       }
