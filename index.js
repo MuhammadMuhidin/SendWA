@@ -244,6 +244,7 @@ app.post("/send", async (req, res) => {
 
     const result = await sock.sendMessage(target, { text: msg })
 
+    console.log(`sent to ${to} ${msg}`)
     return res.json({
       status: "sent",
       to,
@@ -251,6 +252,7 @@ app.post("/send", async (req, res) => {
     })
 
   } catch (err) {
+    console.log("send error:", err?.message)
     return res.status(500).json({
       status: "error",
       message: err?.message || "failed"
