@@ -22,6 +22,7 @@ let sock = null
 let isConnected = false
 let isPairingRequested = false
 let pairingRetryTimer = null
+let hasLoggedPairingSuccess = false
 const PAIRING_TIMEOUT = 20 * 1000 // 20 detik
 
 /* =========================
@@ -153,11 +154,17 @@ async function initWithCode() {
   sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
 
     if (connection === "open") {
-      isConnected = true
-        if (pairingRetryTimer) {
-          clearTimeout(pairingRetryTimer)
-            pairingRetryTimer = null
-        }
+  isConnected = true
+
+  if (!hasLoggedPairingSuccess) {
+    console.log("Pairing success. WhatsApp connected.")
+    hasLoggedPairingSuccess = true
+  }
+
+  if (pairingRetryTimer) {
+    clearTimeout(pairingRetryTimer)
+    pairingRetryTimer = null
+  }
     }
 
     if (connection === "close") {
