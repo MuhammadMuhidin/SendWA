@@ -1,69 +1,180 @@
 import express from "express"
-import {
-  makeWASocket,
+import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason
-} from "baileys"
+} from "@whiskeysockets/baileys"
+import qrcode from "qrcode-terminal"
 
-const PHONE = process.env.PHONE_NUMBER
-if (!PHONE) {
-  console.error("PHONE_NUMBER belum di-set (628xxxx)")
-  process.exit(1)
-}
+const PORT = process.env.PORT || 3000
+const PHONE_NUMBER = process.env.PHONE_NUMBER
+const PAIR_TYPE = process.env.PAIR_TYPE || "QR"
 
 const app = express()
 app.use(express.json())
 
-let sock
+let sock = null
+let isConnected = false
+let isPairingRequested = false
 
-const jid = (to) =>
-  to.replace(/^0/, "62") + "@s.whatsapp.net"
+const silentLogger = {
+  level: "silent",
+  child() { return this },
+  info() {},
+  error() {},
+  warn() {},
+  debug() {},
+  trace() {},
+  fatal() {}
+}
 
-async function startWA() {
+/* =========================
+   MODE: PAIRING CODE
+========================= */
+
+function formatJid(number) {
+  const cleaned = number.replace(/^0/, "62")
+  return `${cleaned}@s.whatsapp.net`
+}
+
+async function initWithCode() {
   const { state, saveCreds } = await useMultiFileAuthState("auth")
   const { version } = await fetchLatestBaileysVersion()
 
-  sock = makeWASocket({ version, auth: state })
+  sock = makeWASocket({
+    version,
+    auth: state,
+    browser: ["Ubuntu", "Chrome", "120.0.0"],
+    printQRInTerminal: false,
+    logger: silentLogger
+  })
 
   sock.ev.on("creds.update", saveCreds)
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
+
     if (connection === "open") {
-      console.log("WhatsApp connected")
+      isConnected = true
     }
 
     if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
-
-      if (shouldReconnect) startWA()
+      isConnected = false
+      const status = lastDisconnect?.error?.output?.statusCode
+      if (status !== DisconnectReason.loggedOut) {
+        setTimeout(initWithCode, 3000)
+      }
     }
   })
 
-  if (!state.creds.registered) {
-    const code = await sock.requestPairingCode(PHONE)
-    console.log("Pairing code:", code)
+  if (!state.creds.registered && !isPairingRequested) {
+    if (!PHONE_NUMBER) process.exit(1)
+
+    isPairingRequested = true
+
+    setTimeout(async () => {
+      try {
+        const code = await sock.requestPairingCode(PHONE_NUMBER)
+        console.log("Pairing code:", code)
+      } catch {
+        isPairingRequested = false
+      }
+    }, 5000)
   }
 }
+
+/* =========================
+   MODE: QR
+========================= */
+
+const jid = (to) =>
+  to.replace(/^0/, "62") + "@s.whatsapp.net"
+
+async function initWithQR() {
+  const { state, saveCreds } = await useMultiFileAuthState("auth")
+  const { version } = await fetchLatestBaileysVersion()
+
+  sock = makeWASocket({
+    version,
+    auth: state,
+    browser: ["Windows", "Chrome", "120.0.0"],
+    syncFullHistory: false,
+    logger: silentLogger
+  })
+
+  sock.ev.on("creds.update", saveCreds)
+
+  sock.ev.on("connection.update", ({ qr, connection, lastDisconnect }) => {
+
+    if (qr) {
+      console.clear()
+      qrcode.generate(qr, { small: true })
+    }
+
+    if (connection === "open") {
+      isConnected = true
+    }
+
+    if (connection === "close") {
+      isConnected = false
+      const status = lastDisconnect?.error?.output?.statusCode
+      if (status !== DisconnectReason.loggedOut) {
+        setTimeout(initWithQR, 3000)
+      }
+    }
+  })
+}
+
+/* =========================
+   SEND ENDPOINT
+========================= */
 
 app.post("/send", async (req, res) => {
   try {
     const { to, msg } = req.body
-    if (!to || !msg)
-      return res.status(400).json({ error: "to dan msg wajib" })
 
-    await sock.sendMessage(jid(to), { text: msg })
+    if (!to || !msg) {
+      return res.status(400).json({ status: "error" })
+    }
 
-    console.log(`sent to ${to} with msg ${msg}`)
-    res.json({ status: "sent" })
-  } catch {
-    res.status(500).json({ error: "failed" })
+    if (!sock || !isConnected) {
+      return res.status(503).json({ status: "error" })
+    }
+
+    const target =
+      PAIR_TYPE === "CODE"
+        ? formatJid(to)
+        : jid(to)
+
+    const result = await sock.sendMessage(target, { text: msg })
+
+    console.log(`sent to ${to}: ${msg}`)
+
+    return res.json({
+      status: "sent",
+      to,
+      msg
+    })
+
+  } catch (err) {
+    return res.status(500).json({
+      status: "error",
+      message: err?.message || "failed"
+    })
   }
 })
 
-await startWA()
+/* =========================
+   START
+========================= */
 
-app.listen(3000, () => {
-  console.log("Server running on 3000")
-})
+async function start() {
+  if (PAIR_TYPE === "CODE") {
+    await initWithCode()
+  } else {
+    await initWithQR()
+  }
+
+  app.listen(PORT)
+}
+
+start()
