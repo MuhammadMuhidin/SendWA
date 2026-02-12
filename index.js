@@ -21,9 +21,6 @@ app.use(express.json())
 let sock = null
 let isConnected = false
 let isPairingRequested = false
-let pairingRetryTimer = null
-let hasLoggedPairingSuccess = false
-const PAIRING_TIMEOUT = 20 * 1000
 
 /* =========================
    R2 CONFIG
@@ -82,6 +79,7 @@ async function downloadAuth() {
     })
 
     console.log("Auth restored from R2")
+
   } catch {
     console.log("No existing auth in R2")
   }
@@ -92,6 +90,7 @@ function scheduleUpload() {
 
   uploadTimer = setTimeout(async () => {
     if (isUploading) return
+
     try {
       isUploading = true
       await uploadAuth()
@@ -153,18 +152,6 @@ async function initWithCode() {
 
     if (connection === "open") {
       isConnected = true
-
-      if (!hasLoggedPairingSuccess) {
-        console.log("Pairing success. WhatsApp connected.")
-        hasLoggedPairingSuccess = true
-      }
-
-      if (pairingRetryTimer) {
-        clearTimeout(pairingRetryTimer)
-        pairingRetryTimer = null
-      }
-
-      isPairingRequested = false
     }
 
     if (connection === "close") {
@@ -185,13 +172,6 @@ async function initWithCode() {
       try {
         const code = await sock.requestPairingCode(PHONE_NUMBER)
         console.log("Pairing code:", code)
-
-        pairingRetryTimer = setTimeout(() => {
-          if (!isConnected) {
-            console.log("Pairing window expired (20s). No regeneration.")
-          }
-        }, PAIRING_TIMEOUT)
-
       } catch {
         isPairingRequested = false
       }
@@ -262,10 +242,9 @@ app.post("/send", async (req, res) => {
         ? formatJid(to)
         : jid(to)
 
-    await sock.sendMessage(target, { text: msg })
+    const result = await sock.sendMessage(target, { text: msg })
 
     console.log(`sent to ${to} ${msg}`)
-
     return res.json({
       status: "sent",
       to,
