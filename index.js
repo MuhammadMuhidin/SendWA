@@ -129,34 +129,6 @@ const jid = (to) =>
   to.replace(/^0/, "62") + "@s.whatsapp.net"
 
 /* =========================
-   PAIRING LOOP
-========================= */
-
-function startPairingLoop(state) {
-  if (pairingRetryTimer) return
-
-  pairingRetryTimer = setTimeout(async () => {
-    if (!isConnected && !state.creds.registered) {
-      console.log("Pairing expired, generating new code...")
-
-      try {
-        const newCode = await sock.requestPairingCode(PHONE_NUMBER)
-        console.log("New pairing code:", newCode)
-
-        pairingRetryTimer = null
-        startPairingLoop(state)
-      } catch (err) {
-        console.log("Failed to regenerate pairing code:", err.message)
-        pairingRetryTimer = null
-        startPairingLoop(state)
-      }
-    } else {
-      pairingRetryTimer = null
-    }
-  }, PAIRING_TIMEOUT)
-}
-
-/* =========================
    MODE: CODE
 ========================= */
 
@@ -214,7 +186,11 @@ async function initWithCode() {
         const code = await sock.requestPairingCode(PHONE_NUMBER)
         console.log("Pairing code:", code)
 
-        startPairingLoop(state)
+        pairingRetryTimer = setTimeout(() => {
+          if (!isConnected) {
+            console.log("Pairing window expired (20s). No regeneration.")
+          }
+        }, PAIRING_TIMEOUT)
 
       } catch {
         isPairingRequested = false
