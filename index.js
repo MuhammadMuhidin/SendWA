@@ -8,8 +8,7 @@ import qrcode from "qrcode-terminal"
 
 import { Pool } from "pg"
 import fs from "fs"
-import archiver from "archiver"
-import unzipper from "unzipper"
+import path from "path"
 
 const PORT = process.env.PORT || 3000
 const PHONE_NUMBER = process.env.PHONE_NUMBER
@@ -23,6 +22,11 @@ let sock = null
 let isConnected = false
 let isPairingRequested = false
 
+// health state
+let lastConnectedAt = null
+let lastDisconnectAt = null
+let isLoggedOut = false
+
 /* =========================
    POSTGRES CONFIG
 ========================= */
@@ -33,16 +37,15 @@ const pool = new Pool({
 })
 
 async function uploadAuth() {
-  const output = fs.createWriteStream("auth.zip")
-  const archive = archiver("zip")
+  if (!fs.existsSync("auth")) return
 
-  archive.pipe(output)
-  archive.directory("auth/", false)
-  await archive.finalize()
+  const files = fs.readdirSync("auth")
+  const data = {}
 
-  await new Promise(resolve => output.on("close", resolve))
-
-  const zipBuffer = fs.readFileSync("auth.zip")
+  for (const file of files) {
+    const content = fs.readFileSync(path.join("auth", file))
+    data[file] = content.toString("base64")
+  }
 
   await pool.query(
     `
@@ -51,7 +54,7 @@ async function uploadAuth() {
     ON CONFLICT (id)
     DO UPDATE SET data = $2, updated_at = NOW()
     `,
-    ["main", zipBuffer]
+    ["main", JSON.stringify(data)]
   )
 
   console.log("Auth uploaded to PostgreSQL")
@@ -73,14 +76,12 @@ async function downloadAuth() {
       return
     }
 
-    fs.writeFileSync("auth.zip", result.rows[0].data)
+    const data = JSON.parse(result.rows[0].data)
 
-    await new Promise((resolve, reject) => {
-      fs.createReadStream("auth.zip")
-        .pipe(unzipper.Extract({ path: "./auth" }))
-        .on("close", resolve)
-        .on("error", reject)
-    })
+    for (const file in data) {
+      const buffer = Buffer.from(data[file], "base64")
+      fs.writeFileSync(path.join("auth", file), buffer)
+    }
 
     console.log("Auth restored from PostgreSQL")
 
@@ -130,8 +131,32 @@ function formatJid(number) {
   return `${cleaned}@s.whatsapp.net`
 }
 
-const jid = (to) =>
-  to.replace(/^0/, "62") + "@s.whatsapp.net"
+/* =========================
+   CONNECTION HANDLER
+========================= */
+
+function handleConnectionUpdate(connection, lastDisconnect, reconnectFn) {
+  if (connection === "open") {
+    isConnected = true
+    isLoggedOut = false
+    lastConnectedAt = Date.now()
+  }
+
+  if (connection === "close") {
+    isConnected = false
+    lastDisconnectAt = Date.now()
+
+    const status = lastDisconnect?.error?.output?.statusCode
+
+    if (status === DisconnectReason.loggedOut) {
+      isLoggedOut = true
+      console.log("Device unpaired (logged out)")
+      return
+    }
+
+    setTimeout(reconnectFn, 3000)
+  }
+}
 
 /* =========================
    MODE: CODE
@@ -154,19 +179,8 @@ async function initWithCode() {
     scheduleUpload()
   })
 
-  sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
-
-    if (connection === "open") {
-      isConnected = true
-    }
-
-    if (connection === "close") {
-      isConnected = false
-      const status = lastDisconnect?.error?.output?.statusCode
-      if (status !== DisconnectReason.loggedOut) {
-        setTimeout(initWithCode, 3000)
-      }
-    }
+  sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+    handleConnectionUpdate(connection, lastDisconnect, initWithCode)
   })
 
   if (!state.creds.registered && !isPairingRequested) {
@@ -197,7 +211,6 @@ async function initWithQR() {
     version,
     auth: state,
     browser: ["Windows", "Chrome", "120.0.0"],
-    syncFullHistory: false,
     logger: silentLogger
   })
 
@@ -213,19 +226,51 @@ async function initWithQR() {
       qrcode.generate(qr, { small: true })
     }
 
-    if (connection === "open") {
-      isConnected = true
-    }
-
-    if (connection === "close") {
-      isConnected = false
-      const status = lastDisconnect?.error?.output?.statusCode
-      if (status !== DisconnectReason.loggedOut) {
-        setTimeout(initWithQR, 3000)
-      }
-    }
+    handleConnectionUpdate(connection, lastDisconnect, initWithQR)
   })
 }
+
+/* =========================
+   HEALTH CHECK
+========================= */
+
+async function isHealthy() {
+  if (!sock) return false
+  if (isLoggedOut) return false
+
+  if (!isConnected) {
+    if (lastDisconnectAt && Date.now() - lastDisconnectAt < 60000) {
+      return true
+    }
+    return false
+  }
+
+  try {
+    await pool.query("SELECT 1")
+  } catch {
+    return false
+  }
+
+  return true
+}
+
+app.get("/health", async (req, res) => {
+  const healthy = await isHealthy()
+
+  if (!healthy) {
+    return res.status(500).json({
+      status: "unhealthy",
+      connected: isConnected,
+      paired: !isLoggedOut
+    })
+  }
+
+  res.json({
+    status: "healthy",
+    connected: true,
+    paired: true
+  })
+})
 
 /* =========================
    SEND ENDPOINT
@@ -243,10 +288,7 @@ app.post("/send", async (req, res) => {
       return res.status(503).json({ status: "error" })
     }
 
-    const target =
-      PAIR_TYPE === "CODE"
-        ? formatJid(to)
-        : jid(to)
+    const target = formatJid(to)
 
     await sock.sendMessage(target, { text: msg })
 
