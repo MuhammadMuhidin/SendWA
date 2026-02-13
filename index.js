@@ -310,10 +310,28 @@ app.get("/repair", async (req, res) => {
 })
 
 /* =========================
+   PROTECT SEND ENDPOINT
+========================= */
+
+function protectSend(req, res, next) {
+  const apiKey = req.headers["x-api-key"]
+
+  if (!process.env.SEND_API_KEY) {
+    return res.status(500).json({ status: "server misconfiguration!" })
+  }
+
+  if (!apiKey || apiKey !== process.env.SEND_API_KEY) {
+    return res.status(401).json({ status: "unauthorized!" })
+  }
+
+  next()
+}
+
+/* =========================
    SEND ENDPOINT
 ========================= */
 
-app.post("/send", async (req, res) => {
+app.post("/send", protectSend, async (req, res) => {
   try {
     const { to, msg } = req.body
 
