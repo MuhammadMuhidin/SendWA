@@ -22,10 +22,11 @@ let sock = null
 let isConnected = false
 let isPairingRequested = false
 
-// health state
+// health & lifecycle state
 let lastConnectedAt = null
 let lastDisconnectAt = null
 let isLoggedOut = false
+let requiresRePair = false
 
 /* =========================
    POSTGRES CONFIG
@@ -139,6 +140,7 @@ function handleConnectionUpdate(connection, lastDisconnect, reconnectFn) {
   if (connection === "open") {
     isConnected = true
     isLoggedOut = false
+    requiresRePair = false
     lastConnectedAt = Date.now()
   }
 
@@ -150,6 +152,7 @@ function handleConnectionUpdate(connection, lastDisconnect, reconnectFn) {
 
     if (status === DisconnectReason.loggedOut) {
       isLoggedOut = true
+      requiresRePair = true
       console.log("Device unpaired (logged out)")
       return
     }
@@ -236,6 +239,7 @@ async function initWithQR() {
 
 async function isHealthy() {
   if (!sock) return false
+  if (requiresRePair) return false
   if (isLoggedOut) return false
 
   if (!isConnected) {
@@ -261,7 +265,8 @@ app.get("/health", async (req, res) => {
     return res.status(500).json({
       status: "unhealthy",
       connected: isConnected,
-      paired: !isLoggedOut
+      paired: !requiresRePair,
+      requiresRePair
     })
   }
 
@@ -270,6 +275,38 @@ app.get("/health", async (req, res) => {
     connected: true,
     paired: true
   })
+})
+
+/* =========================
+   MANUAL REPAIR TRIGGER
+========================= */
+
+app.post("/repair", async (req, res) => {
+  if (!requiresRePair) {
+    return res.status(400).json({ status: "not_required" })
+  }
+
+  try {
+    if (fs.existsSync("auth")) {
+      fs.rmSync("auth", { recursive: true, force: true })
+    }
+
+    await pool.query("DELETE FROM wa_session WHERE id = $1", ["main"])
+
+    requiresRePair = false
+    isLoggedOut = false
+    isPairingRequested = false
+
+    if (PAIR_TYPE === "CODE") {
+      await initWithCode()
+    } else {
+      await initWithQR()
+    }
+
+    return res.json({ status: "repair_started" })
+  } catch (err) {
+    return res.status(500).json({ status: "error", message: err.message })
+  }
 })
 
 /* =========================
