@@ -58,7 +58,7 @@ async function uploadAuth() {
     ["main", JSON.stringify(data)]
   )
 
-  console.log("Auth uploaded to PostgreSQL")
+  #console.log("Auth uploaded to PostgreSQL")
 }
 
 async function downloadAuth() {
@@ -84,7 +84,7 @@ async function downloadAuth() {
       fs.writeFileSync(path.join("auth", file), buffer)
     }
 
-    console.log("Auth restored from PostgreSQL")
+    #console.log("Auth restored from PostgreSQL")
 
   } catch (err) {
     console.log("DB restore failed:", err.message)
