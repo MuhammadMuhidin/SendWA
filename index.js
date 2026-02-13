@@ -281,7 +281,7 @@ app.get("/health", async (req, res) => {
    MANUAL REPAIR TRIGGER
 ========================= */
 
-app.post("/repair", async (req, res) => {
+app.get("/repair", async (req, res) => {
   if (!requiresRePair) {
     return res.status(400).json({ status: "not_required" })
   }
