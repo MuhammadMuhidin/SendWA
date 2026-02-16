@@ -13,7 +13,7 @@ import path from "path"
 const PORT = process.env.PORT || 3000
 const PHONE_NUMBER = process.env.PHONE_NUMBER
 const PAIR_TYPE = process.env.PAIR_TYPE || "QR"
-const DATABASE_URL = process.env.SPBASE_URI
+const DATABASE_URL = process.env.NEONDB_URI
 
 const app = express()
 app.use(express.json())
